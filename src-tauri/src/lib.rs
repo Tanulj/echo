@@ -24,7 +24,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            hotkey: "ctrl+shift+r".to_string(),
+            hotkey: "super+shift+r".to_string(),
             model: "large-v3-turbo".to_string(),
             silence_duration: 3.0,
             auto_paste: true,
@@ -83,7 +83,7 @@ async fn get_settings(app: tauri::AppHandle) -> Result<Settings, String> {
     let settings = Settings {
         hotkey: store.get("hotkey")
             .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_else(|| "ctrl+shift+r".to_string()),
+            .unwrap_or_else(|| "super+shift+r".to_string()),
         model: store.get("model")
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_else(|| "large-v3-turbo".to_string()),
@@ -112,7 +112,7 @@ async fn save_settings(app: tauri::AppHandle, settings: Settings, state: tauri::
     if hotkey_changed {
         // Validate new hotkey format first
         let new_shortcut: Shortcut = settings.hotkey.parse()
-            .map_err(|_| "Invalid hotkey format. Use format like: ctrl+shift+r")?;
+            .map_err(|_| "Invalid hotkey format. Use format like: super+shift+r (Cmd) or ctrl+shift+r")?;
 
         // Unregister old hotkey
         if let Ok(old_shortcut) = current_hotkey.parse::<Shortcut>() {
@@ -138,7 +138,8 @@ async fn save_settings(app: tauri::AppHandle, settings: Settings, state: tauri::
 
 #[tauri::command]
 async fn get_available_models() -> Result<Vec<serde_json::Value>, String> {
-    let models_dir = std::path::PathBuf::from("d:\\ws\\echo\\whisper.cpp\\models");
+    let home = std::env::var("HOME").unwrap_or_default();
+    let models_dir = std::path::PathBuf::from(&home).join("Library/Application Support/com.arix.echo/models");
 
     let available_models = vec![
         serde_json::json!({
@@ -180,7 +181,9 @@ async fn get_available_models() -> Result<Vec<serde_json::Value>, String> {
 
 #[tauri::command]
 async fn download_model(model_id: String) -> Result<(), String> {
-    let models_dir = std::path::PathBuf::from("d:\\ws\\echo\\whisper.cpp\\models");
+    let home = std::env::var("HOME").unwrap_or_default();
+    let models_dir = std::path::PathBuf::from(&home).join("Library/Application Support/com.arix.echo/models");
+    std::fs::create_dir_all(&models_dir).map_err(|e| format!("Failed to create models dir: {}", e))?;
 
     let url = match model_id.as_str() {
         "base.en" => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
@@ -276,8 +279,8 @@ async fn start_ptt_recording(app: tauri::AppHandle, state: tauri::State<'_, PttS
     let sample_rate_storage = Arc::clone(&state.sample_rate);
     let channels_storage = Arc::clone(&state.channels);
     let is_recording = Arc::clone(&state.is_recording);
-    let silence_detector = Arc::clone(&state.silence_detector);
-    let silence_stopped = Arc::clone(&state.silence_stopped);
+    let _silence_detector = Arc::clone(&state.silence_detector);
+    let _silence_stopped = Arc::clone(&state.silence_stopped);
     let app_handle = app.clone();
 
     tokio::task::spawn_blocking(move || {
@@ -413,7 +416,7 @@ async fn stop_ptt_recording(state: tauri::State<'_, PttState>) -> Result<String,
 
     drop(samples);
 
-    let path = std::path::PathBuf::from("d:\\ws\\echo\\echo_recording.wav");
+    let path = std::env::temp_dir().join("echo_recording.wav");
 
     let spec = hound::WavSpec {
         channels,
@@ -444,18 +447,20 @@ async fn transcribe_audio(app: tauri::AppHandle, file_path: String) -> Result<St
     let store = app.store("settings.json").map_err(|e| e.to_string())?;
     let model = store.get("model")
         .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "base.en".to_string());
+        .unwrap_or_else(|| "medium.en".to_string());
 
     whisper::transcribe_with_model(&file_path, &model).await
 }
 
 #[tauri::command]
-async fn paste_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
+async fn paste_text(app: tauri::AppHandle, text: String) -> Result<String, String> {
+    // Hide Echo window — macOS will automatically restore focus to the previous app
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.minimize();
+        let _ = window.hide();
     }
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Small yield before blocking
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     tokio::task::spawn_blocking(move || {
         paste::paste_text(&text)
@@ -498,14 +503,13 @@ async fn show_overlay(app: tauri::AppHandle, status: String) -> Result<(), Strin
     .inner_size(window_width, window_height)
     .position(x, y)
     .decorations(false)
-    .transparent(true)
     .always_on_top(true)
     .skip_taskbar(true)
     .focused(false)
     .resizable(false)
     .visible(true)
     .build()
-    .map_err(|e| e.to_string())?;
+    .map_err(|e: tauri::Error| e.to_string())?;
 
     // Send initial status after window loads
     let app_clone = app.clone();
@@ -523,6 +527,50 @@ async fn hide_overlay(app: tauri::AppHandle) -> Result<(), String> {
         let _ = window.close();
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionStatus {
+    pub accessibility: bool,
+    pub microphone: bool,
+}
+
+#[tauri::command]
+async fn check_permissions() -> PermissionStatus {
+    // Check Accessibility by running a harmless osascript keystroke test
+    let accessibility = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg("tell application \"System Events\" to get frontmost of first process")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    // Check microphone by trying to access the default input device config
+    let microphone = tokio::task::spawn_blocking(|| {
+        use cpal::traits::{DeviceTrait, HostTrait};
+        let host = cpal::default_host();
+        host.default_input_device()
+            .and_then(|d| d.default_input_config().ok())
+            .is_some()
+    })
+    .await
+    .unwrap_or(false);
+
+    PermissionStatus { accessibility, microphone }
+}
+
+#[tauri::command]
+fn open_accessibility_settings() {
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        .spawn();
+}
+
+#[tauri::command]
+fn open_microphone_settings() {
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+        .spawn();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -555,16 +603,16 @@ pub fn run() {
             is_recording: Arc::new(AtomicBool::new(false)),
             silence_detector: Arc::new(Mutex::new(silence::SilenceDetector::new(3.0))),
             silence_stopped: Arc::new(AtomicBool::new(false)),
-            current_hotkey: Arc::new(Mutex::new("ctrl+shift+r".to_string())),
+            current_hotkey: Arc::new(Mutex::new("super+shift+r".to_string())),
         })
         .setup(|app| {
             // Load settings and register hotkey
             let hotkey = if let Ok(store) = app.store("settings.json") {
                 store.get("hotkey")
                     .and_then(|v| v.as_str().map(|s| s.to_string()))
-                    .unwrap_or_else(|| "ctrl+shift+r".to_string())
+                    .unwrap_or_else(|| "super+shift+r".to_string())
             } else {
-                "ctrl+shift+r".to_string()
+                "super+shift+r".to_string()
             };
 
             let shortcut: Shortcut = hotkey.parse().expect("Failed to parse shortcut");
@@ -634,7 +682,10 @@ pub fn run() {
             add_to_history,
             clear_history,
             show_overlay,
-            hide_overlay
+            hide_overlay,
+            check_permissions,
+            open_accessibility_settings,
+            open_microphone_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -7,6 +7,7 @@ pub struct SilenceDetector {
     /// How long silence before triggering
     silence_duration: Duration,
     /// RMS threshold for voice detection (0.005 = 0.5%)
+    #[allow(dead_code)]
     voice_threshold: f32,
     /// Has voice ever been detected?
     has_detected_voice: bool,
@@ -23,6 +24,7 @@ impl SilenceDetector {
     }
 
     /// Update with current RMS level, returns true if silence threshold exceeded
+    #[allow(dead_code)]
     pub fn update(&mut self, rms: f32) -> bool {
         if rms > self.voice_threshold {
             // Voice detected

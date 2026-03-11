@@ -101,8 +101,8 @@ impl AudioRecorder {
         // Apply audio normalization/gain to boost quiet recordings
         let normalized_samples = self.normalize_audio(&samples);
 
-        // Save to WAV file in d:\ws\echo directory
-        let path = std::path::PathBuf::from("d:\\ws\\echo\\echo_recording.wav");
+        // Save to WAV file in the system temp directory
+        let path = std::env::temp_dir().join("echo_recording.wav");
         self.save_wav(&path, &normalized_samples)?;
 
         Ok(path.to_string_lossy().to_string())

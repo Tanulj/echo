@@ -40,8 +40,8 @@ function App() {
   const [pttSeconds, setPttSeconds] = useState(0);
   const [audioLevel, setAudioLevel] = useState(0);
   const [settings, setSettings] = useState<Settings>({
-    hotkey: "ctrl+shift+r",
-    model: "base.en",
+    hotkey: "super+shift+r",
+    model: "medium.en",
     silence_duration: 3,
     auto_paste: true,
   });
@@ -49,6 +49,8 @@ function App() {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [recordingStartTime, setRecordingStartTime] = useState<number | null>(null);
+  const [permissions, setPermissions] = useState<{ accessibility: boolean; microphone: boolean } | null>(null);
+  const [pasteHint, setPasteHint] = useState("");
 
   const recordingModeRef = useRef<RecordingMode>("idle");
   const pttTimerRef = useRef<number | null>(null);
@@ -61,6 +63,14 @@ function App() {
     loadSettings();
     loadModels();
     loadHistory();
+    checkPermissions();
+  }, []);
+
+  // Re-check permissions whenever the window regains focus (user may have just granted access)
+  useEffect(() => {
+    const onFocus = () => checkPermissions();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
   }, []);
 
   useEffect(() => {
@@ -70,10 +80,31 @@ function App() {
     return () => { unlisten.then((fn) => fn()); };
   }, []);
 
+  async function doPaste(text: string) {
+    try {
+      const status = await invoke<string>("paste_text", { text });
+      if (status === "copied") {
+        setPasteHint("📋 Copied to clipboard — press ⌘V to paste");
+        setTimeout(() => setPasteHint(""), 8000);
+      } else {
+        setPasteHint("");
+      }
+    } catch (err) {
+      setError(`Paste error: ${err}`);
+    }
+  }
+
   async function loadSettings() {
     try {
       const s = await invoke<Settings>("get_settings");
       setSettings(s);
+    } catch (_) {}
+  }
+
+  async function checkPermissions() {
+    try {
+      const p = await invoke<{ accessibility: boolean; microphone: boolean }>("check_permissions");
+      setPermissions(p);
     } catch (_) {}
   }
 
@@ -142,7 +173,7 @@ function App() {
 
         if (settings.auto_paste) {
           setProcessingState("pasting");
-          await invoke("paste_text", { text });
+          await doPaste(text);
         }
       }
     } catch (err) {
@@ -223,7 +254,7 @@ function App() {
 
         if (settings.auto_paste) {
           setProcessingState("pasting");
-          await invoke("paste_text", { text });
+          await doPaste(text);
         }
       }
     } catch (err) {
@@ -236,11 +267,7 @@ function App() {
   }
 
   async function copyFromHistory(text: string) {
-    try {
-      await invoke("paste_text", { text });
-    } catch (err) {
-      setError(`Failed to paste: ${err}`);
-    }
+    await doPaste(text);
   }
 
   async function clearAllHistory() {
@@ -280,6 +307,20 @@ function App() {
   return (
     <main className="container">
         <h1>Echo</h1>
+
+        {/* Permission banners */}
+        {permissions && !permissions.accessibility && (
+          <div className="permission-banner">
+            ⚠️ <strong>Accessibility permission required</strong> for auto-paste.
+            <button onClick={() => invoke("open_accessibility_settings")}>Open Settings</button>
+          </div>
+        )}
+        {permissions && !permissions.microphone && (
+          <div className="permission-banner">
+            ⚠️ <strong>Microphone permission required</strong> for recording.
+            <button onClick={() => invoke("open_microphone_settings")}>Open Settings</button>
+          </div>
+        )}
 
         <div className="tabs">
           <button
@@ -361,6 +402,7 @@ function App() {
             </p>
 
             {error && <div className="error">{error}</div>}
+            {pasteHint && <div className="paste-hint">{pasteHint}</div>}
 
             {/* Show processing indicator during transcription */}
             {processingState === "transcribing" && (
@@ -374,7 +416,7 @@ function App() {
               <div className="transcription">
                 <h3>Transcription:</h3>
                 <textarea readOnly value={transcription} />
-                <button onClick={() => invoke("paste_text", { text: transcription })}>
+                <button onClick={() => doPaste(transcription)}>
                   Paste to Cursor
                 </button>
               </div>
@@ -424,9 +466,9 @@ function App() {
                 type="text"
                 value={settings.hotkey}
                 onChange={(e) => setSettings({ ...settings, hotkey: e.target.value.toLowerCase() })}
-                placeholder="e.g., ctrl+shift+r"
+                placeholder="e.g., super+shift+r or ctrl+shift+r"
               />
-              <small>Format: modifier+modifier+key (e.g., ctrl+shift+r, alt+space)</small>
+              <small>Format: modifier+modifier+key (e.g., super+shift+r for Cmd+Shift+R on Mac)</small>
             </div>
 
             <div className="setting-group">

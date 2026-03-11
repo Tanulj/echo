@@ -10,25 +10,63 @@ fn find_whisper_path() -> Result<std::path::PathBuf, String> {
     match whisper_path {
         Ok(path) => Ok(path),
         Err(_) => {
-            let fallback = std::path::PathBuf::from("d:\\ws\\echo\\whisper.cpp\\build\\bin\\Release\\whisper-cli.exe");
-            if fallback.exists() {
-                Ok(fallback)
-            } else {
-                Err("Whisper executable not found. Please install whisper.cpp.".to_string())
+            // Check common build locations
+            let home = std::env::var("HOME").unwrap_or_default();
+            let candidates = vec![
+                std::path::PathBuf::from(&home).join("whisper.cpp/build/bin/whisper-cli"),
+                std::path::PathBuf::from(&home).join("whisper.cpp/main"),
+                std::path::PathBuf::from("/usr/local/bin/whisper-cli"),
+                std::path::PathBuf::from("/opt/homebrew/bin/whisper-cli"),
+            ];
+            for candidate in candidates {
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
             }
+            Err("Whisper executable not found. Please install whisper.cpp.".to_string())
         }
     }
 }
 
 /// Get model path for given model ID
 fn get_model_path(model_id: &str) -> Result<std::path::PathBuf, String> {
-    let model_path = std::path::PathBuf::from(format!("d:\\ws\\echo\\whisper.cpp\\models\\ggml-{}.bin", model_id));
+    let home = std::env::var("HOME").unwrap_or_default();
 
-    if !model_path.exists() {
-        return Err(format!("Model {} not found. Please download it from Settings.", model_id));
+    // models/ folder next to the .app bundle (3 parents up from the exe inside the .app)
+    let beside_app = std::env::current_exe().ok()
+        .and_then(|p| p.parent().and_then(|p| p.parent()).and_then(|p| p.parent()).map(|p| p.to_path_buf()))
+        .map(|p| p.join("models").join(format!("ggml-{}.bin", model_id)));
+
+    // Check locations in order of preference
+    let mut candidates = vec![
+        // models/ next to the .app bundle
+        beside_app,
+        // macOS app support directory
+        Some(std::path::PathBuf::from(&home)
+            .join("Library/Application Support/com.arix.echo/models")
+            .join(format!("ggml-{}.bin", model_id))),
+        // Common whisper.cpp build location
+        Some(std::path::PathBuf::from(&home)
+            .join("whisper.cpp/models")
+            .join(format!("ggml-{}.bin", model_id))),
+    ];
+
+    for candidate in candidates.iter().flatten() {
+        if candidate.exists() {
+            return Ok(candidate.clone());
+        }
     }
 
-    Ok(model_path)
+    // Return the "next to .app" path in the error so user knows where to drop the model
+    let preferred = candidates.remove(0).unwrap_or_else(|| {
+        std::path::PathBuf::from(&home)
+            .join("Library/Application Support/com.arix.echo/models")
+            .join(format!("ggml-{}.bin", model_id))
+    });
+    Err(format!(
+        "Model '{}' not found. Place ggml-{}.bin in:\n  {}",
+        model_id, model_id, preferred.display()
+    ))
 }
 
 /// Get optimal thread count

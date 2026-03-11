@@ -1,77 +1,44 @@
-use arboard::Clipboard;
-use rdev::{simulate, EventType, Key as RdevKey, SimulateError};
-use std::thread;
-use std::time::Duration;
+use std::io::Write;
 
-pub fn paste_text(text: &str) -> Result<(), String> {
-    // Initialize clipboard
-    let mut clipboard =
-        Clipboard::new().map_err(|e| format!("Failed to initialize clipboard: {}", e))?;
+/// Set clipboard via pbcopy then simulate Cmd+V via osascript.
+/// Returns "pasted" if auto-paste succeeded, "copied" if Accessibility is blocked.
+pub fn paste_text(text: &str) -> Result<String, String> {
+    // Write to clipboard via pbcopy (no Accessibility needed)
+    let mut child = std::process::Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn pbcopy: {}", e))?;
 
-    // Set transcribed text as clipboard content
-    clipboard
-        .set_text(text)
-        .map_err(|e| format!("Failed to set clipboard: {}", e))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes())
+            .map_err(|e| format!("Failed to write to pbcopy: {}", e))?;
+    }
+    child.wait().map_err(|e| format!("pbcopy failed: {}", e))?;
+    eprintln!("Clipboard set via pbcopy ({} chars)", text.len());
 
-    eprintln!("Set clipboard content: {}", text);
+    // Attempt Cmd+V via osascript — requires Accessibility permission
+    let script = r#"delay 0.6
+tell application "System Events" to keystroke "v" using {command down}"#;
 
-    // Longer delay to let user's target window regain focus
-    // The Echo window has focus after recording, so we need to wait
-    thread::sleep(Duration::from_millis(300));
+    let output = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output();
 
-    // Simulate Ctrl+V to paste
-    paste_with_rdev().map_err(|e| format!("Failed to paste: {:?}", e))?;
-
-    Ok(())
-}
-
-fn send_key_event(event_type: &EventType) -> Result<(), SimulateError> {
-    match simulate(event_type) {
-        Ok(()) => {
-            // Let the OS catch up
-            thread::sleep(Duration::from_millis(50));
-            Ok(())
+    match output {
+        Ok(o) if o.status.success() => {
+            eprintln!("osascript paste succeeded");
+            Ok("pasted".to_string())
+        }
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            eprintln!("osascript keystroke blocked: {}", err.trim());
+            // Clipboard is already set — user can press Cmd+V manually
+            Ok("copied".to_string())
         }
         Err(e) => {
-            eprintln!("Failed to send event {:?}: {:?}", event_type, e);
-            Err(e)
+            eprintln!("Failed to run osascript: {}", e);
+            Ok("copied".to_string())
         }
     }
-}
-
-fn paste_with_rdev() -> Result<(), SimulateError> {
-    eprintln!("Starting Windows paste simulation with rdev");
-
-    // Add initial delay for reliability
-    thread::sleep(Duration::from_millis(50));
-
-    // Try paste with retry logic
-    for attempt in 1..=2 {
-        eprintln!("Windows paste attempt {}/2", attempt);
-
-        let result = (|| {
-            send_key_event(&EventType::KeyPress(RdevKey::ControlLeft))?;
-            send_key_event(&EventType::KeyPress(RdevKey::KeyV))?;
-            send_key_event(&EventType::KeyRelease(RdevKey::KeyV))?;
-            send_key_event(&EventType::KeyRelease(RdevKey::ControlLeft))?;
-            Ok::<(), SimulateError>(())
-        })();
-
-        match result {
-            Ok(_) => {
-                eprintln!("Windows paste simulation completed on attempt {}", attempt);
-                return Ok(());
-            }
-            Err(e) if attempt < 2 => {
-                eprintln!("Windows paste attempt {} failed: {:?}, retrying...", attempt, e);
-                thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => {
-                eprintln!("Windows paste failed after 2 attempts: {:?}", e);
-                return Err(e);
-            }
-        }
-    }
-
-    unreachable!()
 }
